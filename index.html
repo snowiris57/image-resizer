@@ -269,12 +269,13 @@ async function processFile(file, relPath) {
 
     const keepPng = (ext === "png" || file.type === "image/png") && await hasTransparency(bitmap);
     const mime = keepPng ? "image/png" : "image/jpeg";
-    const blob = await compressToTarget(bitmap, mime, target);
+    const res = await compressToTarget(bitmap, mime, target);
     bitmap.close?.();
 
-    if (!blob || blob.size > limitBytes) {
+    if (!res || res.blob.size > limitBytes) {
       throw new Error("目標サイズまで圧縮できませんでした");
     }
+    const blob = res.blob;
 
     const base = file.name.replace(/\.[^.]+$/, "");
     const outName = base + "_resize." + (keepPng ? "png" : "jpg");
@@ -284,11 +285,13 @@ async function processFile(file, relPath) {
     toolbar.hidden = false;
 
     const url = URL.createObjectURL(blob);
-    const pct = Math.round((1 - blob.size / file.size) * 100);
+    const detail = [];
+    detail.push(res.scale < 1 ? `解像度${Math.round(res.scale * 100)}%` : "解像度そのまま");
+    if (res.q != null) detail.push(`画質${Math.round(res.q * 100)}%`);
     card.querySelector(".sizes").innerHTML =
-      `${fmtMB(file.size)} → <span class="after">${fmtMB(blob.size)}</span>（${pct}%削減）`;
+      `${fmtMB(file.size)} → <span class="after">${fmtMB(blob.size)}</span>（${detail.join("・")}）`;
     statusEl.className = "status ok";
-    statusEl.textContent = "✅ 完了 — ダウンロードしてLINEで送れます";
+    statusEl.textContent = "✅ 完了 — この画像で" + limitSel.value + "MBに収まる最高画質です";
 
     const a = document.createElement("a");
     a.className = "btn";
@@ -376,33 +379,34 @@ async function compressToTarget(bitmap, mime, target) {
     for (let attempt = 0; attempt < 5; attempt++, scale *= 0.7) {
       let hi = 1.0;
       let blob = await encodeAt(bitmap, scale, mime, hi);
-      if (blob.size <= target) return blob; // 最高画質でも収まる
+      if (blob.size <= target) return { blob, q: hi, scale }; // 最高画質でも収まる
 
       let lo = 0.5;
       let best = await encodeAt(bitmap, scale, mime, lo);
       if (best.size > target) continue; // 最低画質でも収まらない→解像度を下げて再挑戦
+      let bestQ = lo;
 
       // 上限の98%まで最後の1段階まで詰める（JPEGの画質は1%刻みなので7回で収束）
       for (let i = 0; i < 7 && best.size < target * 0.98; i++) {
         const q = (lo + hi) / 2;
         blob = await encodeAt(bitmap, scale, mime, q);
-        if (blob.size <= target) { best = blob; lo = q; } else { hi = q; }
+        if (blob.size <= target) { best = blob; bestQ = q; lo = q; } else { hi = q; }
       }
-      return best;
+      return { blob: best, q: bestQ, scale };
     }
     return null;
   }
 
   // PNGは画質パラメータがないので、上限に収まる最大の解像度を探す
   let blob = await encodeAt(bitmap, scale, mime);
-  if (blob.size <= target) return blob;
-  let lo = 0, hi = scale, best = null;
+  if (blob.size <= target) return { blob, q: null, scale };
+  let lo = 0, hi = scale, best = null, bestScale = scale;
   for (let i = 0; i < 8 && !(best && best.size >= target * 0.93); i++) {
     const mid = (lo + hi) / 2;
     blob = await encodeAt(bitmap, mid, mime);
-    if (blob.size <= target) { best = blob; lo = mid; } else { hi = mid; }
+    if (blob.size <= target) { best = blob; bestScale = mid; lo = mid; } else { hi = mid; }
   }
-  return best;
+  return best ? { blob: best, q: null, scale: bestScale } : null;
 }
 
 // ---------- ZIP (無圧縮STORE形式・依存ライブラリなし) ----------
