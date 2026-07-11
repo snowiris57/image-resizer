@@ -53,6 +53,8 @@
     border: 1px solid var(--line); border-radius: 8px;
     padding: 6px 10px; font-size: 13px;
   }
+  .chk { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px; }
+  .chk input { accent-color: var(--accent-dim); width: 15px; height: 15px; cursor: pointer; }
   .list { margin-top: 8px; display: flex; flex-direction: column; gap: 10px; }
   .card {
     background: var(--panel); border: 1px solid var(--line);
@@ -124,6 +126,7 @@
       </select>
     </label>
     <button class="btn ghost" id="pickFolder">📁 フォルダごと選択</button>
+    <label class="chk"><input type="checkbox" id="keepExif" checked> EXIF（撮影情報）を引き継ぐ</label>
     <span id="note"></span>
   </div>
 
@@ -138,7 +141,7 @@
     ・20MB以下のJPG/PNGはそのままLINEで送れるため「圧縮不要」と表示します（BMPはLINEでファイル扱いになるためJPGに変換します）。<br>
     ・透過（背景が透明）のPNGは透過を保ったままPNGで縮小し、それ以外はJPGに変換して圧縮します。<br>
     ・画質はできるだけ落とさず、上限ギリギリを狙って圧縮します。確実に上限未満になります。<br>
-    ・JPG→JPGの変換では、撮影日時・カメラ情報・PPIなどのEXIFとカラープロファイルを引き継ぎます。
+    ・「EXIFを引き継ぐ」がONのとき、JPG→JPGの変換で撮影日時・カメラ情報・PPIなどのEXIFとカラープロファイルを引き継ぎます。OFFにするとメタデータを除去します（位置情報などを渡したくないとき向け）。
   </footer>
 </div>
 
@@ -271,9 +274,10 @@ async function processFile(file, relPath) {
     const keepPng = (ext === "png" || file.type === "image/png") && await hasTransparency(bitmap);
     const mime = keepPng ? "image/png" : "image/jpeg";
 
-    // 元がJPGなら、撮影情報(EXIF)とカラープロファイル(ICC)を引き継ぐ
+    // 元がJPGなら、撮影情報(EXIF)とカラープロファイル(ICC)を引き継ぐ（チェックONのとき）
     let metaSegs = [];
-    if (mime === "image/jpeg" && (file.type === "image/jpeg" || /\.jpe?g$/i.test(file.name))) {
+    if ($("keepExif").checked && mime === "image/jpeg" &&
+        (file.type === "image/jpeg" || /\.jpe?g$/i.test(file.name))) {
       try { metaSegs = extractJpegMeta(new Uint8Array(await file.arrayBuffer())); } catch (_) { /* 引き継ぎ失敗は無視 */ }
     }
     let metaLen = metaSegs.reduce((sum, seg) => sum + seg.length, 0);
