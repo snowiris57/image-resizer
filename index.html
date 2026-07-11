@@ -29,6 +29,7 @@
   h1 { font-size: 20px; margin: 8px 0 4px; }
   .lead { color: var(--sub); font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
   .drop {
+    display: block;
     border: 2px dashed var(--line);
     border-radius: 16px;
     background: var(--panel);
@@ -86,6 +87,7 @@
     border: 1px solid var(--line);
   }
   .toolbar { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  .toolbar[hidden] { display: none; }
   .spinner {
     display: inline-block; width: 12px; height: 12px;
     border: 2px solid var(--line); border-top-color: var(--accent);
