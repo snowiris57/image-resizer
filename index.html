@@ -137,7 +137,8 @@
   <footer>
     ・20MB以下のJPG/PNGはそのままLINEで送れるため「圧縮不要」と表示します（BMPはLINEでファイル扱いになるためJPGに変換します）。<br>
     ・透過（背景が透明）のPNGは透過を保ったままPNGで縮小し、それ以外はJPGに変換して圧縮します。<br>
-    ・画質はできるだけ落とさず、上限ギリギリ（約9割）を狙って圧縮します。確実に上限未満になります。
+    ・画質はできるだけ落とさず、上限ギリギリを狙って圧縮します。確実に上限未満になります。<br>
+    ・JPG→JPGの変換では、撮影日時・カメラ情報・PPIなどのEXIFとカラープロファイルを引き継ぎます。
   </footer>
 </div>
 
@@ -269,13 +270,26 @@ async function processFile(file, relPath) {
 
     const keepPng = (ext === "png" || file.type === "image/png") && await hasTransparency(bitmap);
     const mime = keepPng ? "image/png" : "image/jpeg";
-    const res = await compressToTarget(bitmap, mime, target);
+
+    // 元がJPGなら、撮影情報(EXIF)とカラープロファイル(ICC)を引き継ぐ
+    let metaSegs = [];
+    if (mime === "image/jpeg" && (file.type === "image/jpeg" || /\.jpe?g$/i.test(file.name))) {
+      try { metaSegs = extractJpegMeta(new Uint8Array(await file.arrayBuffer())); } catch (_) { /* 引き継ぎ失敗は無視 */ }
+    }
+    let metaLen = metaSegs.reduce((sum, seg) => sum + seg.length, 0);
+    if (metaLen >= target / 2) { metaSegs = []; metaLen = 0; } // 異常に大きいメタデータは諦める
+
+    const res = await compressToTarget(bitmap, mime, target - metaLen);
     bitmap.close?.();
 
-    if (!res || res.blob.size > limitBytes) {
+    if (!res) {
       throw new Error("目標サイズまで圧縮できませんでした");
     }
-    const blob = res.blob;
+    let blob = res.blob;
+    if (metaSegs.length) blob = await spliceJpegMeta(blob, metaSegs);
+    if (blob.size > limitBytes) {
+      throw new Error("目標サイズまで圧縮できませんでした");
+    }
 
     const base = file.name.replace(/\.[^.]+$/, "");
     const outName = base + "_resize." + (keepPng ? "png" : "jpg");
@@ -288,6 +302,7 @@ async function processFile(file, relPath) {
     const detail = [];
     detail.push(res.scale < 1 ? `解像度${Math.round(res.scale * 100)}%` : "解像度そのまま");
     if (res.q != null) detail.push(`画質${Math.round(res.q * 100)}%`);
+    if (metaSegs.length) detail.push("EXIF引継ぎ");
     card.querySelector(".sizes").innerHTML =
       `${fmtMB(file.size)} → <span class="after">${fmtMB(blob.size)}</span>（${detail.join("・")}）`;
     statusEl.className = "status ok";
@@ -304,6 +319,58 @@ async function processFile(file, relPath) {
     statusEl.className = "status err";
     statusEl.textContent = "❌ " + (err.message || "この画像は処理できませんでした");
   }
+}
+
+// ---------- EXIF引き継ぎ（JPG→JPG のみ） ----------
+// 元JPGのAPP1(Exif: 撮影日時・カメラ情報・PPIなど)とAPP2(ICCカラープロファイル)の
+// セグメントを丸ごと抜き出し、圧縮後のJPGに移植する。
+function extractJpegMeta(bytes) {
+  const segs = [];
+  if (bytes.length < 4 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return segs;
+  let o = 2;
+  while (o + 4 <= bytes.length && bytes[o] === 0xFF) {
+    const marker = bytes[o + 1];
+    if (marker === 0xDA || marker === 0xD9) break; // 画像データ本体に到達
+    const len = (bytes[o + 2] << 8) | bytes[o + 3];
+    if (len < 2 || o + 2 + len > bytes.length) break;
+    const head = String.fromCharCode(bytes[o + 4], bytes[o + 5], bytes[o + 6], bytes[o + 7]);
+    const isExif = marker === 0xE1 && head === "Exif" && bytes[o + 8] === 0;
+    const isIcc = marker === 0xE2 && head === "ICC_";
+    if (isExif || isIcc) {
+      const seg = bytes.slice(o, o + 2 + len);
+      if (isExif) clearExifOrientation(seg);
+      segs.push(seg);
+    }
+    o += 2 + len;
+  }
+  return segs;
+}
+
+// 回転は圧縮時にピクセルへ反映済みなので、Orientationタグを「1（回転なし）」に
+// 上書きする（残すと表示ソフトが二重に回転してしまう）
+function clearExifOrientation(seg) {
+  try {
+    const v = new DataView(seg.buffer, seg.byteOffset, seg.byteLength);
+    const tiff = 10; // FF E1 len(2) "Exif\0\0" の直後がTIFFヘッダ
+    const little = seg[tiff] === 0x49; // "II"=リトルエンディアン
+    const ifd0 = tiff + v.getUint32(tiff + 4, little);
+    const n = v.getUint16(ifd0, little);
+    for (let i = 0; i < n; i++) {
+      const entry = ifd0 + 2 + i * 12;
+      if (v.getUint16(entry, little) === 0x0112) {
+        v.setUint16(entry + 8, 1, little);
+        return;
+      }
+    }
+  } catch (_) { /* 壊れたEXIFは触らずそのまま */ }
+}
+
+// Canvasが出力したJPGのSOI(とJFIF APP0)の直後にメタデータを差し込む
+async function spliceJpegMeta(blob, segs) {
+  const out = new Uint8Array(await blob.arrayBuffer());
+  let at = 2;
+  if (out[2] === 0xFF && out[3] === 0xE0) at = 4 + ((out[4] << 8) | out[5]);
+  return new Blob([out.subarray(0, at), ...segs, out.subarray(at)], { type: "image/jpeg" });
 }
 
 // ---------- decoding (EXIF orientation対応 + フォールバック) ----------
