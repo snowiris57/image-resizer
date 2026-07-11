@@ -141,7 +141,8 @@
     ・20MB以下のJPG/PNGはそのままLINEで送れるため「圧縮不要」と表示します（BMPはLINEでファイル扱いになるためJPGに変換します）。<br>
     ・透過（背景が透明）のPNGは透過を保ったままPNGで縮小し、それ以外はJPGに変換して圧縮します。<br>
     ・画質はできるだけ落とさず、上限ギリギリを狙って圧縮します。確実に上限未満になります。<br>
-    ・「EXIFを引き継ぐ」がONのとき、JPG→JPGの変換で撮影日時・カメラ情報・PPIなどのEXIFとカラープロファイルを引き継ぎます。OFFにするとメタデータを除去します（位置情報などを渡したくないとき向け）。
+    ・「EXIFを引き継ぐ」がONのとき、JPG→JPGの変換で撮影日時・カメラ情報・PPIなどのEXIFとカラープロファイルを引き継ぎます。OFFにするとメタデータを除去します（位置情報などを渡したくないとき向け）。<br>
+    ・ファイルの更新日時は「まとめてダウンロード（ZIP）」で保存して解凍すると元のまま復元されます（「保存」ボタンの単体ダウンロードはブラウザの仕様でダウンロード時刻になります）。
   </footer>
 </div>
 
@@ -299,7 +300,7 @@ async function processFile(file, relPath) {
     const outName = base + "_resize." + (keepPng ? "png" : "jpg");
     // ZIP内ではフォルダ構成を保つ（例: 旅行/写真1_resize.jpg）
     const dir = shownName.includes("/") ? shownName.slice(0, shownName.lastIndexOf("/") + 1) : "";
-    results.push({ name: dir + outName, blob });
+    results.push({ name: dir + outName, blob, mtime: file.lastModified });
     toolbar.hidden = false;
 
     const url = URL.createObjectURL(blob);
@@ -497,19 +498,32 @@ function crc32(bytes) {
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
+// ZIPエントリ用のDOS形式日時（元ファイルの更新日時を引き継ぐため）
+function dosDateTime(ms) {
+  const d = new Date(ms || Date.now());
+  if (d.getFullYear() < 1980) return { time: 0, date: 0x21 }; // DOS日時の下限は1980年
+  return {
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    date: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
 async function buildZip(entries) {
   const enc = new TextEncoder();
   const chunks = [], central = [];
   let offset = 0;
-  for (const { name, blob } of entries) {
+  for (const { name, blob, mtime } of entries) {
     const data = new Uint8Array(await blob.arrayBuffer());
     const nameBytes = enc.encode(name);
     const crc = crc32(data);
+    const dt = dosDateTime(mtime);
     const local = new DataView(new ArrayBuffer(30));
     local.setUint32(0, 0x04034b50, true);
     local.setUint16(4, 20, true);        // version needed
     local.setUint16(6, 0x0800, true);    // UTF-8 filename flag
     local.setUint16(8, 0, true);         // method: store
+    local.setUint16(10, dt.time, true);  // 更新時刻
+    local.setUint16(12, dt.date, true);  // 更新日付
     local.setUint32(14, crc, true);
     local.setUint32(18, data.length, true);
     local.setUint32(22, data.length, true);
@@ -522,6 +536,8 @@ async function buildZip(entries) {
     cen.setUint16(6, 20, true);
     cen.setUint16(8, 0x0800, true);
     cen.setUint16(10, 0, true);
+    cen.setUint16(12, dt.time, true);
+    cen.setUint16(14, dt.date, true);
     cen.setUint32(16, crc, true);
     cen.setUint32(20, data.length, true);
     cen.setUint32(24, data.length, true);
@@ -540,12 +556,9 @@ async function buildZip(entries) {
   return new Blob([...chunks, ...central, end.buffer], { type: "application/zip" });
 }
 
+// 1枚でも常にZIPで保存する（ZIP経由なら元の更新日時を引き継げるため）
 $("dlAll").addEventListener("click", async () => {
   if (!results.length) return;
-  if (results.length === 1) { // 1枚ならZIPにせずそのまま保存
-    triggerDownload(URL.createObjectURL(results[0].blob), results[0].name);
-    return;
-  }
   const zip = await buildZip(results);
   triggerDownload(URL.createObjectURL(zip), "resize_images.zip");
 });
