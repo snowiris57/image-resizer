@@ -382,8 +382,8 @@ async function compressToTarget(bitmap, mime, target) {
       let best = await encodeAt(bitmap, scale, mime, lo);
       if (best.size > target) continue; // 最低画質でも収まらない→解像度を下げて再挑戦
 
-      // 上限の90%以上まで詰められたら十分（それ以上は誤差）
-      for (let i = 0; i < 6 && best.size < target * 0.9; i++) {
+      // 上限の98%まで最後の1段階まで詰める（JPEGの画質は1%刻みなので7回で収束）
+      for (let i = 0; i < 7 && best.size < target * 0.98; i++) {
         const q = (lo + hi) / 2;
         blob = await encodeAt(bitmap, scale, mime, q);
         if (blob.size <= target) { best = blob; lo = q; } else { hi = q; }
@@ -397,7 +397,7 @@ async function compressToTarget(bitmap, mime, target) {
   let blob = await encodeAt(bitmap, scale, mime);
   if (blob.size <= target) return blob;
   let lo = 0, hi = scale, best = null;
-  for (let i = 0; i < 7 && !(best && best.size >= target * 0.85); i++) {
+  for (let i = 0; i < 8 && !(best && best.size >= target * 0.93); i++) {
     const mid = (lo + hi) / 2;
     blob = await encodeAt(bitmap, mid, mime);
     if (blob.size <= target) { best = blob; lo = mid; } else { hi = mid; }
