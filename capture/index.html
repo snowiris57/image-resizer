@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>連続スクショくん — 画面共有を自動キャプチャ</title>
+<style>
+  :root {
+    --bg: #12121a;
+    --panel: #1c1c28;
+    --panel2: #242432;
+    --text: #e8e8f0;
+    --sub: #9a9ab0;
+    --accent: #4ade80;
+    --accent-dim: #22c55e;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --line: #34343f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", sans-serif;
+    min-height: 100vh;
+    padding: 16px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  .lead { color: var(--sub); font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
+  .btn {
+    background: var(--accent-dim); color: #06220f; border: none;
+    border-radius: 10px; padding: 10px 16px; font-size: 14px;
+    font-weight: bold; cursor: pointer;
+  }
+  .btn:disabled { opacity: .35; cursor: default; }
+  .btn.ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+  .btn.danger { background: #7f1d1d; color: #fecaca; }
+  .controls {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px; margin-bottom: 12px;
+    font-size: 13px; color: var(--sub);
+  }
+  select, input[type=number] {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 10px; font-size: 13px;
+  }
+  input[type=number] { width: 64px; }
+  .stage {
+    position: relative; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden; margin-bottom: 12px; display: none;
+  }
+  .stage.active { display: block; }
+  .stage.flash { outline: 3px solid var(--accent); }
+  video { width: 100%; height: auto; display: block; }
+  #cropLayer {
+    position: absolute; inset: 0; cursor: crosshair;
+  }
+  #cropBox {
+    position: absolute; border: 2px dashed var(--accent);
+    background: rgba(74, 222, 128, .08); display: none; pointer-events: none;
+  }
+  .stagebar {
+    position: absolute; top: 8px; left: 8px; right: 8px;
+    display: flex; gap: 8px; align-items: center;
+    pointer-events: none;
+  }
+  .stagebar > * { pointer-events: auto; }
+  .badge {
+    background: rgba(0,0,0,.65); color: var(--text);
+    border-radius: 8px; padding: 4px 10px; font-size: 12px;
+  }
+  .badge b { color: var(--accent); }
+  .smallbtn {
+    background: rgba(0,0,0,.65); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  .status { font-size: 13px; color: var(--sub); margin: 0 0 12px 2px; min-height: 18px; }
+  .status .on { color: var(--accent); }
+  .gallery {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 10px;
+  }
+  .shot {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; position: relative;
+  }
+  .shot img { width: 100%; height: 100px; object-fit: cover; display: block; cursor: pointer; }
+  .shot .cap {
+    font-size: 11px; color: var(--sub); padding: 5px 8px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .shot .del {
+    background: none; border: none; color: var(--err);
+    cursor: pointer; font-size: 12px; padding: 0 2px;
+  }
+  .toolbar { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .toolbar[hidden] { display: none; }
+  footer { color: var(--sub); font-size: 11px; margin-top: 28px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📸 連続スクショくん</h1>
+  <p class="lead">
+    Web会議の画面に映っているPDFや資料を、ページ送りに合わせて自動でスクショ保存します。<br>
+    映像はどこにも送信されません。すべてこの端末の中だけで処理されます。
+  </p>
+
+  <div class="controls">
+    <button class="btn" id="start">▶ キャプチャ開始</button>
+    <button class="btn danger" id="stop" disabled>⏹ 停止</button>
+    <label>モード:
+      <select id="mode">
+        <option value="auto" selected>自動（ページ送りを検知）</option>
+        <option value="interval">定間隔</option>
+        <option value="manual">手動のみ</option>
+      </select>
+    </label>
+    <label id="sensWrap">感度:
+      <select id="sens">
+        <option value="0.8">敏感</option>
+        <option value="2.5" selected>普通</option>
+        <option value="8">鈍感</option>
+      </select>
+    </label>
+    <label id="intWrap" hidden>間隔:
+      <input type="number" id="intervalSec" value="3" min="1" max="600"> 秒
+    </label>
+    <label>形式:
+      <select id="fmt">
+        <option value="png" selected>PNG（文字がくっきり）</option>
+        <option value="jpg">JPG（軽い）</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="stage" id="stage">
+    <video id="video" muted playsinline></video>
+    <div id="cropLayer"><div id="cropBox"></div></div>
+    <div class="stagebar">
+      <span class="badge">保存 <b id="count">0</b> 枚</span>
+      <button class="smallbtn" id="snapNow">📸 今すぐ撮る</button>
+      <button class="smallbtn" id="cropClear" hidden>✕ 範囲指定を解除</button>
+      <span class="badge" id="cropHint">ドラッグで撮る範囲を指定できます</span>
+    </div>
+  </div>
+
+  <div class="status" id="status">「キャプチャ開始」を押して、会議アプリのウィンドウ（または画面全体）を選んでください。</div>
+
+  <div class="gallery" id="gallery"></div>
+
+  <div class="toolbar" id="toolbar" hidden>
+    <button class="btn" id="dlAll">✅ まとめてダウンロード（ZIP）</button>
+    <button class="btn ghost" id="clear">全部消す</button>
+  </div>
+
+  <footer>
+    ・自動モードは「画面が大きく変わり、そのあと静止した」瞬間に保存します。マウスカーソル程度の動きは無視します。<br>
+    ・会議の相手の顔なども映る場合は、プレビューをドラッグして資料部分だけ範囲指定すると、検知も保存もその範囲だけになります。<br>
+    ・このタブを裏に回しても動きますが、チェック間隔が約1秒に伸びます。会議ウィンドウと並べて表示しておくと確実です。<br>
+    ・ZIPで保存すると、各画像の更新日時が撮影時刻になります。映像・画像はすべて端末内で処理され、外部送信は一切ありません。
+  </footer>
+</div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), stage = $("stage"), statusEl = $("status");
+const gallery = $("gallery"), toolbar = $("toolbar");
+
+let stream = null;
+let timer = null;
+const shots = []; // { name, blob, mtime, url }
+
+// ---------- モードUI ----------
+$("mode").addEventListener("change", () => {
+  $("sensWrap").hidden = $("mode").value !== "auto";
+  $("intWrap").hidden = $("mode").value !== "interval";
+});
+
+// ---------- キャプチャ開始/停止 ----------
+$("start").addEventListener("click", async () => {
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 8 },
+      audio: false,
+    });
+  } catch (_) {
+    setStatus("キャンセルされました。もう一度「キャプチャ開始」からやり直せます。");
+    return;
+  }
+  video.srcObject = stream;
+  await video.play();
+  stream.getVideoTracks()[0].addEventListener("ended", stopCapture); // ブラウザ側の「共有を停止」
+  resetDetector();
+  timer = setInterval(tick, 400);
+  stage.classList.add("active");
+  $("start").disabled = true;
+  $("stop").disabled = false;
+  setStatus("監視中… ページを送ると自動で保存されます。", true);
+});
+
+$("stop").addEventListener("click", stopCapture);
+
+function stopCapture() {
+  if (timer) { clearInterval(timer); timer = null; }
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  video.srcObject = null;
+  stage.classList.remove("active");
+  $("start").disabled = false;
+  $("stop").disabled = true;
+  setStatus(shots.length
+    ? `停止しました。${shots.length}枚保存済み — 下のZIPボタンでまとめて保存できます。`
+    : "停止しました。");
+}
+
+function setStatus(text, on) {
+  statusEl.innerHTML = on ? `<span class="on">●</span> ${text}` : text;
+}
+
+// ---------- 範囲指定（クロップ） ----------
+let crop = null; // {x,y,w,h} 0〜1の正規化座標
+const cropLayer = $("cropLayer"), cropBox = $("cropBox");
+let dragStart = null;
+
+cropLayer.addEventListener("pointerdown", (e) => {
+  const r = cropLayer.getBoundingClientRect();
+  dragStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+  cropLayer.setPointerCapture(e.pointerId);
+});
+cropLayer.addEventListener("pointermove", (e) => {
+  if (!dragStart) return;
+  const r = cropLayer.getBoundingClientRect();
+  const cur = { x: e.clientX - r.left, y: e.clientY - r.top };
+  drawCropBox(dragStart, cur, r);
+});
+cropLayer.addEventListener("pointerup", (e) => {
+  if (!dragStart) return;
+  const r = cropLayer.getBoundingClientRect();
+  const cur = { x: e.clientX - r.left, y: e.clientY - r.top };
+  const x = Math.min(dragStart.x, cur.x), y = Math.min(dragStart.y, cur.y);
+  const w = Math.abs(cur.x - dragStart.x), h = Math.abs(cur.y - dragStart.y);
+  dragStart = null;
+  if (w < 20 || h < 20) { clearCrop(); return; } // 小さすぎるドラッグは解除扱い
+  crop = { x: x / r.width, y: y / r.height, w: w / r.width, h: h / r.height };
+  $("cropClear").hidden = false;
+  $("cropHint").hidden = true;
+  resetDetector(); // 範囲が変わったら検知をやり直す
+});
+$("cropClear").addEventListener("click", clearCrop);
+
+function drawCropBox(a, b, r) {
+  cropBox.style.display = "block";
+  cropBox.style.left = Math.min(a.x, b.x) + "px";
+  cropBox.style.top = Math.min(a.y, b.y) + "px";
+  cropBox.style.width = Math.abs(b.x - a.x) + "px";
+  cropBox.style.height = Math.abs(b.y - a.y) + "px";
+}
+
+function clearCrop() {
+  crop = null;
+  cropBox.style.display = "none";
+  $("cropClear").hidden = true;
+  $("cropHint").hidden = false;
+  resetDetector();
+}
+
+// 実際の映像ピクセル座標での切り出し範囲
+function cropRect() {
+  const W = video.videoWidth, H = video.videoHeight;
+  if (!crop) return { sx: 0, sy: 0, sw: W, sh: H };
+  return {
+    sx: Math.round(crop.x * W), sy: Math.round(crop.y * H),
+    sw: Math.max(8, Math.round(crop.w * W)), sh: Math.max(8, Math.round(crop.h * H)),
+  };
+}
+
+// ---------- ページ送り検知 ----------
+// 縮小グレースケール画像どうしで「変化したピクセルの割合(%)」を比較し、
+// 「大きく変わった後に静止した」フレームだけ保存する。
+// (平均変化量だとレイアウトが似たページの差が薄まるため、割合方式を使う)
+const sigCanvas = document.createElement("canvas");
+const sigCtx = sigCanvas.getContext("2d", { willReadFrequently: true });
+const STABLE_TH = 0.3;   // 変化がこの%未満なら「静止」とみなす
+const DEDUPE_TH = 0.3;   // 定間隔モードで同一画面をスキップする閾値(%)
+let lastSavedSig = null, prevSig = null, stableCount = 0, lastShotAt = 0;
+
+function resetDetector() {
+  lastSavedSig = null; prevSig = null; stableCount = 0; lastShotAt = 0;
+}
+
+function grabSig() {
+  const { sx, sy, sw, sh } = cropRect();
+  const w = 160, h = Math.max(8, Math.round(160 * sh / sw));
+  sigCanvas.width = w; sigCanvas.height = h;
+  sigCtx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+  const d = sigCtx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < g.length; i++) {
+    const p = i * 4;
+    g[i] = (d[p] + d[p + 1] + d[p + 2]) / 3;
+  }
+  return g;
+}
+
+function diffRatio(a, b) { // 変化したピクセルの割合(%)
+  if (!b || b.length !== a.length) return 100;
+  let n = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (Math.abs(a[i] - b[i]) > 12) n++;
+  }
+  return (n * 100) / a.length;
+}
+
+function tick() {
+  if (!stream || video.videoWidth === 0) return;
+  const sig = grabSig();
+  const diffPrev = diffRatio(sig, prevSig);
+  prevSig = sig;
+  const mode = $("mode").value;
+
+  if (mode === "auto") {
+    if (diffPrev < STABLE_TH) stableCount++; else stableCount = 0;
+    const changeTh = Number($("sens").value);
+    const diffSaved = diffRatio(sig, lastSavedSig);
+    if (diffSaved > changeTh && stableCount >= 2) snap(sig);
+  } else if (mode === "interval") {
+    const ms = Math.max(1, Number($("intervalSec").value) || 3) * 1000;
+    if (Date.now() - lastShotAt >= ms && diffRatio(sig, lastSavedSig) > DEDUPE_TH) snap(sig);
+  }
+}
+
+// ---------- 保存 ----------
+$("snapNow").addEventListener("click", () => { if (stream) snap(); });
+
+async function snap(sig) {
+  lastSavedSig = sig || grabSig();
+  lastShotAt = Date.now();
+  const { sx, sy, sw, sh } = cropRect();
+  const c = document.createElement("canvas");
+  c.width = sw; c.height = sh;
+  c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  const isPng = $("fmt").value === "png";
+  const blob = await new Promise((res) =>
+    c.toBlob(res, isPng ? "image/png" : "image/jpeg", 0.92));
+  if (!blob) return;
+
+  const name = `shot_${String(shots.length + 1).padStart(3, "0")}.${isPng ? "png" : "jpg"}`;
+  const shot = { name, blob, mtime: Date.now(), url: URL.createObjectURL(blob) };
+  shots.push(shot);
+  addShotCard(shot);
+  $("count").textContent = shots.length;
+  toolbar.hidden = false;
+  setStatus(`監視中… ${shots.length}枚保存しました。`, true);
+  stage.classList.add("flash");
+  setTimeout(() => stage.classList.remove("flash"), 350);
+}
+
+function addShotCard(shot) {
+  const div = document.createElement("div");
+  div.className = "shot";
+  div.innerHTML = `
+    <img alt="" title="クリックで単体保存">
+    <div class="cap"><span></span><button class="del" title="削除">✕</button></div>`;
+  div.querySelector("img").src = shot.url;
+  div.querySelector(".cap span").textContent = shot.name;
+  div.querySelector("img").addEventListener("click", () => triggerDownload(shot.url, shot.name));
+  div.querySelector(".del").addEventListener("click", () => {
+    const i = shots.indexOf(shot);
+    if (i >= 0) shots.splice(i, 1);
+    URL.revokeObjectURL(shot.url);
+    div.remove();
+    $("count").textContent = shots.length;
+    if (!shots.length) toolbar.hidden = true;
+  });
+  gallery.appendChild(div);
+}
+
+$("clear").addEventListener("click", () => {
+  shots.forEach((s) => URL.revokeObjectURL(s.url));
+  shots.length = 0;
+  gallery.innerHTML = "";
+  $("count").textContent = 0;
+  toolbar.hidden = true;
+});
+
+// ---------- ZIP (無圧縮STORE形式・依存ライブラリなし / 更新日時=撮影時刻) ----------
+const crcTable = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function dosDateTime(ms) {
+  const d = new Date(ms || Date.now());
+  if (d.getFullYear() < 1980) return { time: 0, date: 0x21 };
+  return {
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    date: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
+async function buildZip(entries) {
+  const enc = new TextEncoder();
+  const chunks = [], central = [];
+  let offset = 0;
+  for (const { name, blob, mtime } of entries) {
+    const data = new Uint8Array(await blob.arrayBuffer());
+    const nameBytes = enc.encode(name);
+    const crc = crc32(data);
+    const dt = dosDateTime(mtime);
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0x0800, true);
+    local.setUint16(8, 0, true);
+    local.setUint16(10, dt.time, true);
+    local.setUint16(12, dt.date, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, data.length, true);
+    local.setUint32(22, data.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    chunks.push(local.buffer, nameBytes, data);
+
+    const cen = new DataView(new ArrayBuffer(46));
+    cen.setUint32(0, 0x02014b50, true);
+    cen.setUint16(4, 20, true);
+    cen.setUint16(6, 20, true);
+    cen.setUint16(8, 0x0800, true);
+    cen.setUint16(10, 0, true);
+    cen.setUint16(12, dt.time, true);
+    cen.setUint16(14, dt.date, true);
+    cen.setUint32(16, crc, true);
+    cen.setUint32(20, data.length, true);
+    cen.setUint32(24, data.length, true);
+    cen.setUint16(28, nameBytes.length, true);
+    cen.setUint32(42, offset, true);
+    central.push(cen.buffer, nameBytes);
+    offset += 30 + nameBytes.length + data.length;
+  }
+  const centralSize = central.reduce((s, b) => s + (b.byteLength ?? b.length), 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(8, entries.length, true);
+  end.setUint16(10, entries.length, true);
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, offset, true);
+  return new Blob([...chunks, ...central, end.buffer], { type: "application/zip" });
+}
+
+$("dlAll").addEventListener("click", async () => {
+  if (!shots.length) return;
+  const zip = await buildZip(shots);
+  triggerDownload(URL.createObjectURL(zip), "screenshots.zip");
+});
+
+function triggerDownload(url, name) {
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+</script>
+</body>
+</html>
