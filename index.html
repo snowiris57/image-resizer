@@ -175,6 +175,8 @@ drop.addEventListener("drop", async (e) => {
 });
 fileInput.addEventListener("change", () => { handleFiles(fileInput.files); fileInput.value = ""; });
 $("pickFolder").addEventListener("click", () => folderInput.click());
+// スマホのブラウザはフォルダ選択に非対応なのでボタンを隠す(複数選択は使える)
+if (/Android|iPhone|iPad/i.test(navigator.userAgent)) $("pickFolder").style.display = "none";
 folderInput.addEventListener("change", () => { handleFiles(folderInput.files); folderInput.value = ""; });
 $("clear").addEventListener("click", () => {
   list.innerHTML = ""; results.length = 0; toolbar.hidden = true; $("note").textContent = "";

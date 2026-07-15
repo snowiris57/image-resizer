@@ -136,6 +136,8 @@
         <option value="jpg">JPG（軽い）</option>
       </select>
     </label>
+    <button class="btn ghost" id="pickVideo">🎬 録画から抽出</button>
+    <input type="file" id="videoFile" accept="video/*" style="display:none">
   </div>
 
   <div class="stage" id="stage">
@@ -166,7 +168,8 @@
     ・自動モードは「画面が大きく変わり、そのあと静止した」瞬間に保存します。会議映像のノイズで静止が取れない場合も、変化から約2.5秒後に必ず保存します（取りこぼし防止）。<br>
     ・会議の相手の顔なども映る場合は、プレビューをドラッグして資料部分だけ範囲指定すると、検知も保存もその範囲だけになります。<br>
     ・キャプチャ対象は「画面全体」より<b>会議アプリのウィンドウ</b>を選ぶのがおすすめです（浮かせた📸ボタンが写り込みません）。<br>
-    ・ZIPで保存すると、各画像の更新日時が撮影時刻になります。映像・画像はすべて端末内で処理され、外部送信は一切ありません。
+    ・ZIPで保存すると、各画像の更新日時が撮影時刻になります。映像・画像はすべて端末内で処理され、外部送信は一切ありません。<br>
+    ・<b>スマホ（Android/iPhone）の場合:</b> ブラウザの制限でリアルタイムのキャプチャはできませんが、端末の画面録画機能で会議を録画し、「🎬 録画から抽出」に読み込ませればページを自動で取り出せます。PCでもTeams/Zoomの録画ファイルから抽出できます。
   </footer>
 </div>
 
@@ -179,6 +182,7 @@ const gallery = $("gallery"), toolbar = $("toolbar");
 
 let stream = null;
 let timer = null;
+let analyzing = false; // 「録画から抽出」の解析中フラグ
 const shots = []; // { name, blob, mtime, url }
 
 // ---------- モードUI ----------
@@ -214,6 +218,7 @@ $("start").addEventListener("click", async () => {
 $("stop").addEventListener("click", stopCapture);
 
 function stopCapture() {
+  analyzing = false; // 録画解析中なら中断
   if (timer) { clearInterval(timer); timer = null; }
   if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
   closePip();
@@ -471,6 +476,88 @@ async function snapFromPip() {
 
 // ---------- 保存 ----------
 $("snapNow").addEventListener("click", () => { if (stream) snap(); });
+
+// ---------- 録画ファイルからの自動抽出（Android/iPhone・録画済み会議向け） ----------
+// スマホのブラウザは画面キャプチャAPI非対応のため、端末の画面録画機能で
+// 録画したファイルを読み込み、リアルタイム監視と同じ検知ロジックで
+// ページ送りの瞬間を探して静止画を抽出する。
+$("pickVideo").addEventListener("click", () => { if (!analyzing) $("videoFile").click(); });
+$("videoFile").addEventListener("change", () => {
+  const f = $("videoFile").files[0];
+  $("videoFile").value = "";
+  if (f) processVideoFile(f);
+});
+
+async function processVideoFile(file) {
+  if (analyzing || stream) return;
+  analyzing = true;
+  const url = URL.createObjectURL(file);
+  const hasCapture = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  $("start").disabled = true;
+  $("stop").disabled = false;
+  try {
+    video.srcObject = null;
+    video.src = url;
+    video.muted = true;
+    await new Promise((res, rej) => {
+      video.onloadedmetadata = res;
+      video.onerror = () => rej(new Error("この動画は読み込めませんでした"));
+    });
+    // ブラウザ録画(WebM)はdurationがInfinityのことがあるので、末尾へシークして確定させる
+    if (!isFinite(video.duration)) {
+      video.currentTime = 1e9;
+      await new Promise((res) => { video.onseeked = res; });
+    }
+    const dur = video.duration;
+    stage.classList.add("active");
+    resetDetector();
+
+    const STEP = 0.4; // 0.4秒刻みでシークしながら検知
+    const maxPending = Math.max(2, Math.round(PENDING_MAX / 1000 / STEP));
+    let last = null, prev = null, stable = 0, pendingSteps = 0, floor = 0;
+    for (let t = 0; analyzing && t < dur; t += STEP) {
+      video.currentTime = Math.min(t, Math.max(0, dur - 0.05));
+      await new Promise((res) => { video.onseeked = res; });
+      const sig = grabSig();
+      const dPrev = prev ? diffRatio(sig, prev) : 100;
+      const had = prev !== null;
+      prev = sig;
+      if (had && dPrev < 5) floor = floor * 0.9 + dPrev * 0.1;
+      if (dPrev < 0.35 + floor * 1.6) stable++; else stable = 0;
+      const changeTh = Math.max(Number($("sens").value), floor * 3.5 + 0.5);
+      const dSaved = last ? diffRatio(sig, last) : 100;
+      if (dSaved > changeTh) {
+        pendingSteps++;
+        if (stable >= 2 || pendingSteps > maxPending) {
+          await snap(sig);
+          last = sig;
+          pendingSteps = 0;
+        }
+      } else {
+        pendingSteps = 0;
+      }
+      setStatus(`録画を解析中… ${Math.min(100, Math.round((t / dur) * 100))}%（${shots.length}枚）`, true);
+    }
+    setStatus(analyzing
+      ? `解析完了 — ${shots.length}枚を抽出しました。ZIPでまとめて保存できます。`
+      : `中断しました（${shots.length}枚保存済み）`);
+  } catch (err) {
+    setStatus("❌ " + (err.message || "解析に失敗しました"));
+  }
+  analyzing = false;
+  stage.classList.remove("active");
+  video.removeAttribute("src");
+  video.load();
+  URL.revokeObjectURL(url);
+  $("start").disabled = !hasCapture;
+  $("stop").disabled = true;
+}
+
+// 画面キャプチャAPIが無いブラウザ(Android/iPhone等)では録画抽出モードを案内する
+if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+  $("start").disabled = true;
+  setStatus("このブラウザは画面キャプチャ非対応です（Android/iPhoneのブラウザなど）。会議中はスマホの画面録画機能で録画し、終わったら「🎬 録画から抽出」でページを自動で取り出せます。");
+}
 
 // スペースキーで手動撮影（フォーム部品にフォーカス中は誤爆しないよう除外）
 document.addEventListener("keydown", (e) => {
