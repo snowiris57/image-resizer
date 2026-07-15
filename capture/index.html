@@ -190,13 +190,15 @@ $("mode").addEventListener("change", () => {
 $("start").addEventListener("click", async () => {
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 8 },
+      video: { frameRate: 8, cursor: "never" }, // マウスカーソルを映像に含めない
       audio: false,
     });
   } catch (_) {
     setStatus("キャンセルされました。もう一度「キャプチャ開始」からやり直せます。");
     return;
   }
+  // 対応ブラウザではカーソル除去を確実に適用(非対応なら黙って無視)
+  try { await stream.getVideoTracks()[0].applyConstraints({ cursor: "never" }); } catch (_) {}
   video.srcObject = stream;
   await video.play();
   stream.getVideoTracks()[0].addEventListener("ended", stopCapture); // ブラウザ側の「共有を停止」
@@ -388,7 +390,7 @@ function buildPipUi(w) {
     "font-size:17px;padding:10px 20px;border-radius:10px;border:none;background:#22c55e;color:#06220f;font-weight:bold;cursor:pointer;";
   btn.addEventListener("click", () => {
     if (!stream) return;
-    snap();
+    snapFromPip();
     btn.style.background = "#4ade80"; // 無音なので色でだけフィードバック
     setTimeout(() => { btn.style.background = "#22c55e"; }, 250);
   });
@@ -397,12 +399,61 @@ function buildPipUi(w) {
   cnt.textContent = shots.length + "枚";
   d.body.append(btn, cnt);
   pipCounter = cnt;
-  w.addEventListener("pagehide", () => { pipWin = null; pipCounter = null; });
+  startPipBuffer();
+  w.addEventListener("pagehide", () => { pipWin = null; pipCounter = null; stopPipBuffer(); });
 }
 
 function closePip() {
   if (pipWin) { try { pipWin.close(); } catch (_) {} }
   pipWin = null; pipCounter = null;
+  stopPipBuffer();
+}
+
+// ---------- 浮きボタン用の「少し前のコマ」バッファ ----------
+// ボタンを押す直前はマウスが資料上を横切っているため、カーソル除去が
+// 効かないブラウザでも写り込まないよう、1.2〜2.4秒前のフレームを保持しておき、
+// 画面内容が変わっていなければそちらを保存する。
+let bufNew = null, bufOld = null, bufTimer = null; // { bmp, sig }
+
+function startPipBuffer() {
+  stopPipBuffer();
+  bufTimer = setInterval(async () => {
+    if (!stream || video.videoWidth === 0) return;
+    const { sx, sy, sw, sh } = cropRect();
+    try {
+      const bmp = await createImageBitmap(video, sx, sy, sw, sh);
+      const sig = grabSig();
+      if (bufOld) bufOld.bmp.close();
+      bufOld = bufNew;
+      bufNew = { bmp, sig };
+    } catch (_) { /* フレーム取得失敗は無視 */ }
+  }, 1200);
+}
+
+function stopPipBuffer() {
+  if (bufTimer) { clearInterval(bufTimer); bufTimer = null; }
+  if (bufNew) { bufNew.bmp.close(); bufNew = null; }
+  if (bufOld) { bufOld.bmp.close(); bufOld = null; }
+}
+
+// 浮きボタンからの撮影: 内容が同じなら少し前の(カーソルが写っていない)コマを使う
+async function snapFromPip() {
+  const cand = bufOld || bufNew;
+  if (cand) {
+    const sigNow = grabSig();
+    const sameTh = Math.max(1.5, noiseFloor * 3.5 + 0.5);
+    if (diffRatio(cand.sig, sigNow) < sameTh) {
+      lastSavedSig = cand.sig;
+      lastShotAt = Date.now();
+      pendingSince = 0;
+      const c = document.createElement("canvas");
+      c.width = cand.bmp.width; c.height = cand.bmp.height;
+      c.getContext("2d").drawImage(cand.bmp, 0, 0);
+      await saveCanvas(c);
+      return;
+    }
+  }
+  snap(); // ページが変わった直後などは最新のコマを保存
 }
 
 // ---------- 保存 ----------
@@ -416,6 +467,10 @@ async function snap(sig) {
   const c = document.createElement("canvas");
   c.width = sw; c.height = sh;
   c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  await saveCanvas(c);
+}
+
+async function saveCanvas(c) {
   const isPng = $("fmt").value === "png";
   const blob = await new Promise((res) =>
     c.toBlob(res, isPng ? "image/png" : "image/jpeg", 0.92));
