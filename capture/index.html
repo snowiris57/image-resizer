@@ -143,7 +143,7 @@
     <div id="cropLayer"><div id="cropBox"></div></div>
     <div class="stagebar">
       <span class="badge">保存 <b id="count">0</b> 枚</span>
-      <button class="smallbtn" id="snapNow">📸 今すぐ撮る</button>
+      <button class="smallbtn" id="snapNow">📸 今すぐ撮る（Space）</button>
       <button class="smallbtn" id="pip">📌 撮影ボタンを最前面に浮かせる</button>
       <button class="smallbtn" id="cropClear" hidden>✕ 範囲指定を解除</button>
       <span class="badge" id="cropHint">ドラッグで撮る範囲を指定できます</span>
@@ -385,21 +385,26 @@ function buildPipUi(w) {
   d.body.style.cssText =
     "margin:0;background:#12121a;display:flex;gap:12px;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;";
   const btn = d.createElement("button");
-  btn.textContent = "📸 撮る";
+  btn.textContent = "📸 撮る（Space）";
   btn.style.cssText =
     "font-size:17px;padding:10px 20px;border-radius:10px;border:none;background:#22c55e;color:#06220f;font-weight:bold;cursor:pointer;";
-  btn.addEventListener("click", () => {
+  const fire = () => {
     if (!stream) return;
     snapFromPip();
     btn.style.background = "#4ade80"; // 無音なので色でだけフィードバック
     setTimeout(() => { btn.style.background = "#22c55e"; }, 250);
-  });
+  };
+  btn.addEventListener("click", fire);
   const cnt = d.createElement("span");
   cnt.style.cssText = "color:#e8e8f0;font-size:14px;min-width:3em;";
   cnt.textContent = shots.length + "枚";
   d.body.append(btn, cnt);
   pipCounter = cnt;
   startPipBuffer();
+  // 小窓側にもスペースキーを効かせる（小窓にフォーカスがある間）
+  d.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.key === " ") { e.preventDefault(); fire(); }
+  });
   w.addEventListener("pagehide", () => { pipWin = null; pipCounter = null; stopPipBuffer(); });
 }
 
@@ -458,6 +463,16 @@ async function snapFromPip() {
 
 // ---------- 保存 ----------
 $("snapNow").addEventListener("click", () => { if (stream) snap(); });
+
+// スペースキーで手動撮影（フォーム部品にフォーカス中は誤爆しないよう除外）
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Space" && e.key !== " ") return;
+  const tag = document.activeElement?.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "BUTTON") return;
+  if (!stream) return;
+  e.preventDefault();
+  snap();
+});
 
 async function snap(sig) {
   lastSavedSig = sig || grabSig();
