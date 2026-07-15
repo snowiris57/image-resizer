@@ -122,9 +122,9 @@
     </label>
     <label id="sensWrap">感度:
       <select id="sens">
-        <option value="0.8">敏感</option>
-        <option value="2.5" selected>普通</option>
-        <option value="8">鈍感</option>
+        <option value="0.4">敏感</option>
+        <option value="1.2" selected>普通</option>
+        <option value="4">鈍感</option>
       </select>
     </label>
     <label id="intWrap" hidden>間隔:
@@ -144,6 +144,7 @@
     <div class="stagebar">
       <span class="badge">保存 <b id="count">0</b> 枚</span>
       <button class="smallbtn" id="snapNow">📸 今すぐ撮る</button>
+      <button class="smallbtn" id="pip">📌 撮影ボタンを最前面に浮かせる</button>
       <button class="smallbtn" id="cropClear" hidden>✕ 範囲指定を解除</button>
       <span class="badge" id="cropHint">ドラッグで撮る範囲を指定できます</span>
     </div>
@@ -159,9 +160,11 @@
   </div>
 
   <footer>
-    ・自動モードは「画面が大きく変わり、そのあと静止した」瞬間に保存します。マウスカーソル程度の動きは無視します。<br>
+    ・<b>音は一切出ません。</b>保存の合図はプレビューの緑枠と枚数表示だけです（効果音・通知音なし）。<br>
+    ・「📌 撮影ボタンを最前面に浮かせる」を押すと、小さな📸ボタンだけの小窓が常に最前面に浮きます（Chrome/Edge）。会議画面の隅に置けば、このタブに戻らずワンクリックで撮れます。<br>
+    ・自動モードは「画面が大きく変わり、そのあと静止した」瞬間に保存します。会議映像のノイズで静止が取れない場合も、変化から約2.5秒後に必ず保存します（取りこぼし防止）。<br>
     ・会議の相手の顔なども映る場合は、プレビューをドラッグして資料部分だけ範囲指定すると、検知も保存もその範囲だけになります。<br>
-    ・このタブを裏に回しても動きますが、チェック間隔が約1秒に伸びます。会議ウィンドウと並べて表示しておくと確実です。<br>
+    ・キャプチャ対象は「画面全体」より<b>会議アプリのウィンドウ</b>を選ぶのがおすすめです（浮かせた📸ボタンが写り込みません）。<br>
     ・ZIPで保存すると、各画像の更新日時が撮影時刻になります。映像・画像はすべて端末内で処理され、外部送信は一切ありません。
   </footer>
 </div>
@@ -198,7 +201,7 @@ $("start").addEventListener("click", async () => {
   await video.play();
   stream.getVideoTracks()[0].addEventListener("ended", stopCapture); // ブラウザ側の「共有を停止」
   resetDetector();
-  timer = setInterval(tick, 400);
+  timer = setInterval(tick, 300);
   stage.classList.add("active");
   $("start").disabled = true;
   $("stop").disabled = false;
@@ -210,6 +213,7 @@ $("stop").addEventListener("click", stopCapture);
 function stopCapture() {
   if (timer) { clearInterval(timer); timer = null; }
   if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  closePip();
   video.srcObject = null;
   stage.classList.remove("active");
   $("start").disabled = false;
@@ -286,12 +290,17 @@ function cropRect() {
 // (平均変化量だとレイアウトが似たページの差が薄まるため、割合方式を使う)
 const sigCanvas = document.createElement("canvas");
 const sigCtx = sigCanvas.getContext("2d", { willReadFrequently: true });
-const STABLE_TH = 0.3;   // 変化がこの%未満なら「静止」とみなす
-const DEDUPE_TH = 0.3;   // 定間隔モードで同一画面をスキップする閾値(%)
-let lastSavedSig = null, prevSig = null, stableCount = 0, lastShotAt = 0;
+const STABLE_BASE = 0.35;   // 静止判定の基本閾値(%)
+const DEDUPE_TH = 0.3;      // 定間隔モードで同一画面をスキップする基本閾値(%)
+const PENDING_MAX = 2500;   // 静止が取れなくても、変化からこの時間で必ず保存する(ms)
+let lastSavedSig = null, prevSig = null, stableCount = 0, lastShotAt = 0, pendingSince = 0;
+// 会議映像は圧縮ノイズで常に細かくちらつくため、フレーム間変化量の
+// 移動平均を「ノイズフロア」として学習し、判定閾値を自動で底上げする
+let noiseFloor = 0;
 
 function resetDetector() {
-  lastSavedSig = null; prevSig = null; stableCount = 0; lastShotAt = 0;
+  lastSavedSig = null; prevSig = null; stableCount = 0; lastShotAt = 0; pendingSince = 0;
+  noiseFloor = 0;
 }
 
 function grabSig() {
@@ -320,19 +329,80 @@ function diffRatio(a, b) { // 変化したピクセルの割合(%)
 function tick() {
   if (!stream || video.videoWidth === 0) return;
   const sig = grabSig();
+  const hadPrev = prevSig !== null;
   const diffPrev = diffRatio(sig, prevSig);
   prevSig = sig;
+  // ページ送り級の大変化(5%超)は除外してノイズフロアを学習
+  if (hadPrev && diffPrev < 5) noiseFloor = noiseFloor * 0.9 + diffPrev * 0.1;
+  const stableTh = STABLE_BASE + noiseFloor * 1.6;
   const mode = $("mode").value;
 
   if (mode === "auto") {
-    if (diffPrev < STABLE_TH) stableCount++; else stableCount = 0;
-    const changeTh = Number($("sens").value);
+    if (diffPrev < stableTh) stableCount++; else stableCount = 0;
+    const changeTh = Math.max(Number($("sens").value), noiseFloor * 3.5 + 0.5);
     const diffSaved = diffRatio(sig, lastSavedSig);
-    if (diffSaved > changeTh && stableCount >= 2) snap(sig);
+    if (diffSaved > changeTh) {
+      if (!pendingSince) pendingSince = Date.now();
+      // 静止を確認したら保存。映像ノイズで静止が取れない場合もタイムアウトで必ず保存する
+      if (stableCount >= 2 || Date.now() - pendingSince > PENDING_MAX) snap(sig);
+    } else {
+      pendingSince = 0;
+    }
   } else if (mode === "interval") {
     const ms = Math.max(1, Number($("intervalSec").value) || 3) * 1000;
-    if (Date.now() - lastShotAt >= ms && diffRatio(sig, lastSavedSig) > DEDUPE_TH) snap(sig);
+    const dedupeTh = Math.max(DEDUPE_TH, noiseFloor * 3.5 + 0.5);
+    if (Date.now() - lastShotAt >= ms && diffRatio(sig, lastSavedSig) > dedupeTh) snap(sig);
   }
+}
+
+// ---------- 最前面に浮かぶ撮影ボタン ----------
+// ドキュメントPicture-in-Picture(Chrome/Edge)で、常に最前面の小窓に📸ボタンを出す。
+// 非対応ブラウザでは通常の小さなポップアップにフォールバックする。
+let pipWin = null, pipCounter = null;
+
+$("pip").addEventListener("click", async () => {
+  if (!stream || pipWin) return;
+  try {
+    if (window.documentPictureInPicture) {
+      pipWin = await documentPictureInPicture.requestWindow({ width: 210, height: 90 });
+    } else {
+      pipWin = window.open("", "snapButton", "width=230,height=110,popup=yes");
+    }
+    if (!pipWin) throw new Error("blocked");
+    buildPipUi(pipWin);
+    setStatus("撮影ボタンを浮かせました。会議画面の隅に置いてお使いください。", true);
+  } catch (_) {
+    pipWin = null;
+    setStatus("浮かせボタンを開けませんでした（ポップアップ許可を確認してください）", true);
+  }
+});
+
+function buildPipUi(w) {
+  const d = w.document;
+  d.title = "📸 スクショ";
+  d.body.style.cssText =
+    "margin:0;background:#12121a;display:flex;gap:12px;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;";
+  const btn = d.createElement("button");
+  btn.textContent = "📸 撮る";
+  btn.style.cssText =
+    "font-size:17px;padding:10px 20px;border-radius:10px;border:none;background:#22c55e;color:#06220f;font-weight:bold;cursor:pointer;";
+  btn.addEventListener("click", () => {
+    if (!stream) return;
+    snap();
+    btn.style.background = "#4ade80"; // 無音なので色でだけフィードバック
+    setTimeout(() => { btn.style.background = "#22c55e"; }, 250);
+  });
+  const cnt = d.createElement("span");
+  cnt.style.cssText = "color:#e8e8f0;font-size:14px;min-width:3em;";
+  cnt.textContent = shots.length + "枚";
+  d.body.append(btn, cnt);
+  pipCounter = cnt;
+  w.addEventListener("pagehide", () => { pipWin = null; pipCounter = null; });
+}
+
+function closePip() {
+  if (pipWin) { try { pipWin.close(); } catch (_) {} }
+  pipWin = null; pipCounter = null;
 }
 
 // ---------- 保存 ----------
@@ -341,6 +411,7 @@ $("snapNow").addEventListener("click", () => { if (stream) snap(); });
 async function snap(sig) {
   lastSavedSig = sig || grabSig();
   lastShotAt = Date.now();
+  pendingSince = 0;
   const { sx, sy, sw, sh } = cropRect();
   const c = document.createElement("canvas");
   c.width = sw; c.height = sh;
@@ -355,6 +426,7 @@ async function snap(sig) {
   shots.push(shot);
   addShotCard(shot);
   $("count").textContent = shots.length;
+  if (pipCounter) pipCounter.textContent = shots.length + "枚";
   toolbar.hidden = false;
   setStatus(`監視中… ${shots.length}枚保存しました。`, true);
   stage.classList.add("flash");
