@@ -161,7 +161,8 @@
 
   <footer>
     ・<b>音は一切出ません。</b>保存の合図はプレビューの緑枠と枚数表示だけです（効果音・通知音なし）。<br>
-    ・「📌 撮影ボタンを最前面に浮かせる」を押すと、小さな📸ボタンだけの小窓が常に最前面に浮きます（Chrome/Edge）。会議画面の隅に置けば、このタブに戻らずワンクリックで撮れます。<br>
+    ・「📌 撮影ボタンを最前面に浮かせる」を押すと、小さな📸ボタンだけの小窓が常に最前面に浮きます（Chrome/Edge）。会議画面の隅に置けば、このタブに戻らずワンクリックで撮れます。小窓は<b>どこをクリックしても撮影</b>されます。<br>
+    ・Spaceキーは小窓（またはこのタブ）にフォーカスがある間だけ効きます。会議アプリを操作している間はキー入力がそちらに渡ってしまい反応しないことがあります（ブラウザの仕様上、他アプリ操作中のキー入力を横取りすることはできません）。<b>確実に撮りたいときは浮きボタンのクリック</b>をお使いください。<br>
     ・自動モードは「画面が大きく変わり、そのあと静止した」瞬間に保存します。会議映像のノイズで静止が取れない場合も、変化から約2.5秒後に必ず保存します（取りこぼし防止）。<br>
     ・会議の相手の顔なども映る場合は、プレビューをドラッグして資料部分だけ範囲指定すると、検知も保存もその範囲だけになります。<br>
     ・キャプチャ対象は「画面全体」より<b>会議アプリのウィンドウ</b>を選ぶのがおすすめです（浮かせた📸ボタンが写り込みません）。<br>
@@ -372,7 +373,8 @@ $("pip").addEventListener("click", async () => {
     }
     if (!pipWin) throw new Error("blocked");
     buildPipUi(pipWin);
-    setStatus("撮影ボタンを浮かせました。会議画面の隅に置いてお使いください。", true);
+    try { pipWin.focus(); } catch (_) {} // 開いた直後はクリックなしでもSpaceが効くように
+    setStatus("撮影ボタンを浮かせました。会議画面の隅に置いてお使いください（Spaceが効かない時はクリックでも確実に撮れます）。", true);
   } catch (_) {
     pipWin = null;
     setStatus("浮かせボタンを開けませんでした（ポップアップ許可を確認してください）", true);
@@ -382,26 +384,32 @@ $("pip").addEventListener("click", async () => {
 function buildPipUi(w) {
   const d = w.document;
   d.title = "📸 スクショ";
+  // 小窓全体をクリック対象にする（ボタンの枠を狙わなくても、会議アプリの
+  // 操作でキーボードフォーカスが奪われていても、クリックなら必ず反応する）
   d.body.style.cssText =
-    "margin:0;background:#12121a;display:flex;gap:12px;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;";
-  const btn = d.createElement("button");
+    "margin:0;background:#12121a;display:flex;gap:12px;align-items:center;justify-content:center;" +
+    "height:100vh;font-family:sans-serif;cursor:pointer;user-select:none;";
+  const btn = d.createElement("div");
   btn.textContent = "📸 撮る（Space）";
   btn.style.cssText =
-    "font-size:17px;padding:10px 20px;border-radius:10px;border:none;background:#22c55e;color:#06220f;font-weight:bold;cursor:pointer;";
+    "font-size:17px;padding:10px 20px;border-radius:10px;background:#22c55e;color:#06220f;font-weight:bold;pointer-events:none;";
   const fire = () => {
     if (!stream) return;
     snapFromPip();
     btn.style.background = "#4ade80"; // 無音なので色でだけフィードバック
     setTimeout(() => { btn.style.background = "#22c55e"; }, 250);
   };
-  btn.addEventListener("click", fire);
+  d.body.addEventListener("click", fire); // 小窓のどこをクリックしても撮影
   const cnt = d.createElement("span");
-  cnt.style.cssText = "color:#e8e8f0;font-size:14px;min-width:3em;";
+  cnt.style.cssText = "color:#e8e8f0;font-size:14px;min-width:3em;pointer-events:none;";
   cnt.textContent = shots.length + "枚";
   d.body.append(btn, cnt);
   pipCounter = cnt;
   startPipBuffer();
-  // 小窓側にもスペースキーを効かせる（小窓にフォーカスがある間）
+  // 小窓にフォーカスがある間はSpaceキーでも撮影できる。
+  // ただし会議アプリを操作中はキー入力がそちらへ渡ってしまいSpaceが反応しない
+  // （ブラウザの仕様上、他アプリ操作中のキー入力を横取りすることはできない）。
+  // クリックはOSがフォーカスをこの小窓へ移してから発火するため、常に確実に効く。
   d.addEventListener("keydown", (e) => {
     if (e.code === "Space" || e.key === " ") { e.preventDefault(); fire(); }
   });
