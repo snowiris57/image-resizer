@@ -139,6 +139,8 @@
     </label>
     <button class="btn ghost" id="pickVideo">🎬 録画から抽出</button>
     <input type="file" id="videoFile" accept="video/*" style="display:none">
+    <button class="btn ghost" id="pickPdf">📄 PDFから抽出</button>
+    <input type="file" id="pdfFile" accept="application/pdf,.pdf" style="display:none">
   </div>
 
   <div class="stage" id="stage">
@@ -170,6 +172,7 @@
     ・会議の相手の顔なども映る場合は、プレビューをドラッグして資料部分だけ範囲指定すると、検知も保存もその範囲だけになります。<br>
     ・キャプチャ対象は「画面全体」より<b>撮りたいアプリのウィンドウ</b>を選ぶのがおすすめです（浮かせた📸ボタンが写り込まず、他のウィンドウを前に重ねても影響しません）。<br>
     ・ZIPで保存すると、各画像の更新日時が撮影時刻になります。映像・画像はすべて端末内で処理され、外部送信は一切ありません。<br>
+    ・<b>PDFファイルを持っている場合:</b>「📄 PDFから抽出」が最速です。画面をめくって撮る必要がなく、全ページを自動で高精細に画像化します（ページ数も自動判定）。スマホでも使えます。<br>
     ・<b>スマホ（Android/iPhone）の場合:</b> ブラウザの制限でリアルタイムのキャプチャはできませんが、端末の画面録画機能で会議を録画し、「🎬 録画から抽出」に読み込ませればページを自動で取り出せます。PCでもTeams/Zoomの録画ファイルから抽出できます。
   </footer>
 </div>
@@ -554,10 +557,70 @@ async function processVideoFile(file) {
   $("stop").disabled = true;
 }
 
-// 画面キャプチャAPIが無いブラウザ(Android/iPhone等)では録画抽出モードを案内する
+// ---------- PDFファイルからの全ページ自動抽出 ----------
+// PDFファイルを持っている場合は画面をめくって撮る必要すらないため、
+// ブラウザ内でPDFを直接開いて全ページを画像化する(pdf.jsを同梱)。
+// ページの終わりはPDFのページ数で確定するので終了判定も自動。
+$("pickPdf").addEventListener("click", () => { if (!analyzing) $("pdfFile").click(); });
+$("pdfFile").addEventListener("change", () => {
+  const f = $("pdfFile").files[0];
+  $("pdfFile").value = "";
+  if (f) processPdfFile(f);
+});
+
+let pdfjsLib = null;
+async function loadPdfjs() {
+  if (pdfjsLib) return pdfjsLib;
+  pdfjsLib = await import("./vendor/pdf.min.mjs");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdf.worker.min.mjs";
+  return pdfjsLib;
+}
+
+async function processPdfFile(file) {
+  if (analyzing || stream) return;
+  analyzing = true;
+  const hasCapture = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  $("start").disabled = true;
+  $("stop").disabled = false;
+  let doc = null;
+  try {
+    setStatus("PDF変換エンジンを読み込み中…", true);
+    const lib = await loadPdfjs();
+    const data = new Uint8Array(await file.arrayBuffer());
+    doc = await lib.getDocument({ data }).promise;
+    for (let p = 1; analyzing && p <= doc.numPages; p++) {
+      setStatus(`PDFを画像化中… ${p} / ${doc.numPages} ページ`, true);
+      const page = await doc.getPage(p);
+      let vp = page.getViewport({ scale: 1 });
+      const scale = Math.min(4, 1920 / vp.width); // 幅1920px相当の高精細で書き出す
+      vp = page.getViewport({ scale });
+      const c = document.createElement("canvas");
+      c.width = Math.round(vp.width);
+      c.height = Math.round(vp.height);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, c.width, c.height); // 透過PDF対策の白背景
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      await saveCanvas(c);
+      page.cleanup();
+    }
+    setStatus(analyzing
+      ? `変換完了 — 全${doc.numPages}ページを画像化しました。ZIPでまとめて保存できます。`
+      : `中断しました（${shots.length}枚保存済み）`);
+  } catch (err) {
+    console.error(err);
+    setStatus("❌ " + (err.message || "PDFを読み込めませんでした"));
+  }
+  if (doc) doc.destroy();
+  analyzing = false;
+  $("start").disabled = !hasCapture;
+  $("stop").disabled = true;
+}
+
+// 画面キャプチャAPIが無いブラウザ(Android/iPhone等)では代替モードを案内する
 if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
   $("start").disabled = true;
-  setStatus("このブラウザは画面キャプチャ非対応です（Android/iPhoneのブラウザなど）。会議中はスマホの画面録画機能で録画し、終わったら「🎬 録画から抽出」でページを自動で取り出せます。");
+  setStatus("このブラウザは画面キャプチャ非対応です（Android/iPhoneのブラウザなど）。PDFファイルがあるなら「📄 PDFから抽出」で全ページを自動画像化、画面の記録なら端末の画面録画→「🎬 録画から抽出」が使えます。");
 }
 
 // スペースキーで手動撮影（フォーム部品にフォーカス中は誤爆しないよう除外）
